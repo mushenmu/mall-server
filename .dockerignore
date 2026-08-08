@@ -1,0 +1,22 @@
+# 版本控制
+.git/
+.gitignore
+.dockerignore
+
+# Python 产物
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# 本地开发数据(生产容器用云托管 MySQL,无需携带本地库)
+db.sqlite3
+logs/
+*.log
+
+# 微信开发者工具本地配置(含个人 appid/密钥,不入镜像)
+project.private.config.json
+
+# 系统文件
+.DS_Store
+Thumbs.db
