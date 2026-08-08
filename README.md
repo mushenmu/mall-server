@@ -1,124 +1,113 @@
-# wxcloudrun-django
-[![GitHub license](https://img.shields.io/github/license/WeixinCloud/wxcloudrun-express)](https://github.com/WeixinCloud/wxcloudrun-express)
-![GitHub package.json dependency version (prod)](https://img.shields.io/badge/python-3.7.3-green)
+# mushenmu-mall-server(木神木简单商城 · 后端)
 
-微信云托管 python Django 框架模版，实现简单的计数器读写接口，使用云托管 MySQL 读写、记录计数值。
+微信云托管 Django 模板改造的**简单商城后端**:商品、分类、轮播、购物车、
+订单、收货地址、微信登录,配套小程序前端为同目录下的
+[`mushenmu-mall-mini`](../mushenmu-mall-mini)。
 
-![](https://qcloudimg.tencent-cloud.cn/raw/be22992d297d1b9a1a5365e606276781.png)
+## 快速开始(本地开发)
 
+```bash
+# 1. 安装依赖(本地无 MySQL 环境变量时自动使用 SQLite)
+pip install -r requirements.txt
 
-## 快速开始
-前往 [微信云托管快速开始页面](https://developers.weixin.qq.com/miniprogram/dev/wxcloudrun/src/basic/guide.html)，选择相应语言的模板，根据引导完成部署。
+# 2. 迁移数据库 + 灌入演示数据
+python manage.py migrate
+python manage.py seed
 
-## 本地调试
-下载代码在本地调试，请参考[微信云托管本地调试指南](https://developers.weixin.qq.com/miniprogram/dev/wxcloudrun/src/guide/debug/)
+# 3. 启动服务
+python manage.py runserver 0.0.0.0:8000
 
-## 实时开发
-代码变动时，不需要重新构建和启动容器，即可查看变动后的效果。请参考[微信云托管实时开发指南](https://developers.weixin.qq.com/miniprogram/dev/wxcloudrun/src/guide/debug/dev.html)
-
-## Dockerfile最佳实践
-请参考[如何提高项目构建效率](https://developers.weixin.qq.com/miniprogram/dev/wxcloudrun/src/scene/build/speed.html)
-
-
-## 目录结构说明
-~~~
-.
-├── Dockerfile                  dockerfile
-├── README.md                   README.md文件
-├── container.config.json       模板部署「服务设置」初始化配置（二开请忽略）
-├── manage.py                   django项目管理文件 与项目进行交互的命令行工具集的入口
-├── requirements.txt            依赖包文件
-└── wxcloudrun                  app目录
-    ├── __init__.py             python项目必带  模块化思想
-    ├── apps.py                 自动生成文件apps.py
-    ├── asgi.py                 自动生成文件asgi.py, 异步服务网关接口
-    ├── migrations              数据移植（迁移）模块
-    ├── models.py               数据模块
-    ├── settings.py             项目的总配置文件  里面包含数据库 web应用 日志等各种配置
-    ├── templates               模版目录,包含主页index.html文件
-    ├── urls.py                 URL配置文件  Django项目中所有地址中（页面）都需要我们自己去配置其URL
-    ├── views.py                执行响应的代码所在模块  代码逻辑处理主要地点  项目大部分代码在此编写
-    └── wsgi.py                 自动生成文件wsgi.py, Web服务网关接口
-~~~
-
-
-## 服务 API 文档
-
-### `GET /api/count`
-
-获取当前计数
-
-#### 请求参数
-
-无
-
-#### 响应结果
-
-- `code`：错误码
-- `data`：当前计数值
-
-##### 响应结果示例
-
-```json
-{
-  "code": 0,
-  "data": 42
-}
+# 4. 创建后台管理员(可选)
+python manage.py createsuperuser   # 管理后台:http://127.0.0.1:8000/admin/
 ```
 
-#### 调用示例
+> 微信开发者工具中打开 `mushenmu-mall-mini`,勾选「不校验合法域名」,
+> 即可本地联调(后端跑在 8000 端口)。
+
+## 部署(微信云托管)
+
+与模板一致:配置好环境变量后构建部署即可。
+
+| 环境变量 | 说明 |
+| --- | --- |
+| `MYSQL_ADDRESS` | MySQL 连接地址 `host:port`(设置后自动使用 MySQL) |
+| `MYSQL_USERNAME` / `MYSQL_PASSWORD` / `MYSQL_DATABASE` | MySQL 账号信息 |
+| `WX_APPID` / `WX_SECRET` | 小程序 AppID / AppSecret(设置后登录走微信官方 jscode2session) |
+
+未配置 `WX_APPID`/`WX_SECRET` 时,登录接口进入开发模式:任意 code
+映射到同一个 mock openid,本地联调无需真实密钥。
+
+## API 一览
+
+统一响应信封:`{"data": ..., "code": "Success", "msg": ..., "success": true}`
+价格字段单位为「分」(整数),前端展示时除以 100。
+
+### 首页 / 分类 / 商品
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| GET | `/api/home` | 轮播图 + 分类宫格 + 热门商品 |
+| GET | `/api/category/list` | 分类树(两级) |
+| GET | `/api/goods/list` | 商品列表/搜索:`keyword` `categoryId` `pageNum` `pageSize` `sort`(sales/priceAsc/priceDesc) |
+| GET | `/api/goods/detail?id=` | 商品详情 |
+| GET | `/api/search/popular` | 热门搜索词(演示) |
+
+### 用户 / 地址
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| POST | `/api/user/login` | 微信登录:`{code, nickName?, avatarUrl?}` → `{uid, isNewUser, userInfo}` |
+| GET | `/api/user/center?uid=` | 用户信息 + 各状态订单数量 |
+| GET | `/api/address/list?uid=` | 地址列表 |
+| POST | `/api/address/save` | 新增/编辑地址(带 `id` 为编辑) |
+| POST | `/api/address/delete` | 删除地址 |
+
+### 购物车
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| GET | `/api/cart?uid=` | 购物车列表 + 选中合计 |
+| POST | `/api/cart/add` | 加购 `{uid, productId, quantity?}`(重复加购自动累加) |
+| POST | `/api/cart/update` | 更新 `{uid, id, quantity?/isSelected?}` |
+| POST | `/api/cart/delete` | 删除 `{uid, ids: [...]}` |
+
+### 订单
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| POST | `/api/order/commit` | 下单 `{uid, addressId, remark?, items:[{productId, quantity}]}`(扣库存、清购物车) |
+| GET | `/api/order/list?uid=&status=` | 订单列表(status 空=全部) |
+| GET | `/api/order/detail?orderNo=` | 订单详情 |
+| POST | `/api/order/pay` | 模拟支付(待付款 → 待发货) |
+| POST | `/api/order/cancel` | 取消订单(回补库存) |
+| POST | `/api/order/confirm` | 确认收货 |
+
+## 订单状态
+
+| 值 | 含义 |
+| --- | --- |
+| 0 | 待付款 |
+| 1 | 待发货 |
+| 2 | 待收货 |
+| 3 | 已完成 |
+| 4 | 已取消 |
+
+## 目录结构
 
 ```
-curl https://<云托管服务域名>/api/count
+mushenmu-mall-server/
+├── Dockerfile                  云托管镜像
+├── manage.py                   Django 管理入口
+├── requirements.txt            依赖(Django 3.2 + PyMySQL)
+└── wxcloudrun/
+    ├── models.py               商城数据模型
+    ├── views.py                全部 API 视图
+    ├── urls.py                 路由
+    ├── admin.py                管理后台注册
+    ├── settings.py             配置(本地 SQLite / 云端 MySQL 自动切换)
+    ├── management/commands/seed.py   演示数据初始化
+    └── templates/index.html    落地页
 ```
-
-
-
-### `POST /api/count`
-
-更新计数，自增或者清零
-
-#### 请求参数
-
-- `action`：`string` 类型，枚举值
-  - 等于 `"inc"` 时，表示计数加一
-  - 等于 `"clear"` 时，表示计数重置（清零）
-
-##### 请求参数示例
-
-```
-{
-  "action": "inc"
-}
-```
-
-#### 响应结果
-
-- `code`：错误码
-- `data`：当前计数值
-
-##### 响应结果示例
-
-```json
-{
-  "code": 0,
-  "data": 42
-}
-```
-
-#### 调用示例
-
-```
-curl -X POST -H 'content-type: application/json' -d '{"action": "inc"}' https://<云托管服务域名>/api/count
-```
-
-## 使用注意
-如果不是通过微信云托管控制台部署模板代码，而是自行复制/下载模板代码后，手动新建一个服务并部署，需要在「服务设置」中补全以下环境变量，才可正常使用，否则会引发无法连接数据库，进而导致部署失败。
-- MYSQL_ADDRESS
-- MYSQL_PASSWORD
-- MYSQL_USERNAME
-以上三个变量的值请按实际情况填写。如果使用云托管内MySQL，可以在控制台MySQL页面获取相关信息。
-
 
 ## License
 

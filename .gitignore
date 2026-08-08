@@ -1,0 +1,18 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# 本地数据库与日志
+db.sqlite3
+logs/
+*.log
+
+# 微信开发者工具
+project.private.config.json
+
+# 系统文件
+.DS_Store
+Thumbs.db

@@ -65,17 +65,28 @@ WSGI_APPLICATION = 'wxcloudrun.wsgi.application'
 # Database
 # https://docs.djangoproject.com/en/3.2/ref/settings/#databases
 
-DATABASES = {
-    'default': {
-        'ENGINE': 'django.db.backends.mysql',
-        'NAME': os.environ.get("MYSQL_DATABASE", 'django_demo'),
-        'USER': os.environ.get("MYSQL_USERNAME"),
-        'HOST': os.environ.get("MYSQL_ADDRESS").split(':')[0],
-        'PORT': os.environ.get("MYSQL_ADDRESS").split(':')[1],
-        'PASSWORD': os.environ.get("MYSQL_PASSWORD"),
-        'OPTIONS': {'charset': 'utf8mb4'},
+# 微信云托管部署:通过环境变量注入 MySQL 连接信息。
+# 本地开发:未设置 MYSQL_ADDRESS 时自动回退 SQLite,方便直接调试。
+_MYSQL_ADDRESS = os.environ.get("MYSQL_ADDRESS", "")
+if _MYSQL_ADDRESS:
+    DATABASES = {
+        'default': {
+            'ENGINE': 'django.db.backends.mysql',
+            'NAME': os.environ.get("MYSQL_DATABASE", 'django_demo'),
+            'USER': os.environ.get("MYSQL_USERNAME"),
+            'HOST': _MYSQL_ADDRESS.split(':')[0],
+            'PORT': _MYSQL_ADDRESS.split(':')[1],
+            'PASSWORD': os.environ.get("MYSQL_PASSWORD"),
+            'OPTIONS': {'charset': 'utf8mb4'},
+        }
     }
-}
+else:
+    DATABASES = {
+        'default': {
+            'ENGINE': 'django.db.backends.sqlite3',
+            'NAME': os.path.join(BASE_DIR, 'db.sqlite3'),
+        }
+    }
 
 # Password validation
 # https://docs.djangoproject.com/en/3.2/ref/settings/#auth-password-validators
@@ -169,9 +180,9 @@ LOGGING = {
 # Internationalization
 # https://docs.djangoproject.com/en/3.2/topics/i18n/
 
-LANGUAGE_CODE = 'en-us'
+LANGUAGE_CODE = 'zh-hans'
 
-TIME_ZONE = 'UTC'
+TIME_ZONE = 'Asia/Shanghai'
 
 USE_I18N = True
 
@@ -188,5 +199,12 @@ STATIC_URL = '/static/'
 # https://docs.djangoproject.com/en/3.2/ref/settings/#default-auto-field
 
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
+
+# ---- 微信小程序登录(jscode2session)----
+# 生产:通过环境变量注入真实 AppID / AppSecret(export WX_APPID=... WX_SECRET=...)。
+# 未配置时后端进入开发模式:任意 code 都映射到同一个 mock openid,
+# 微信开发者工具本地联调即可跑通登录流程,无需真实密钥。
+WX_APPID = os.environ.get("WX_APPID", "")
+WX_SECRET = os.environ.get("WX_SECRET", "")
 
 LOGS_DIR = '/data/logs/'
