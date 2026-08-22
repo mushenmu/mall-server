@@ -55,14 +55,15 @@ def _get_or_create_user(uid):
 
 
 def _product_dict(p):
+    gallery = [item.asset.url for item in p.gallery_images.all() if item.asset.file]
+    images = gallery or p.images or [p.image]
     return {
         "id": p.id,
         "title": p.title,
         "subtitle": p.subtitle,
         "image": p.image,
-        "images": p.images or [p.image],
+        "images": images,
         "price": p.price,
-        "originalPrice": p.original_price,
         "stock": p.stock,
         "sales": p.sales,
         "tags": p.tags or [],
@@ -79,7 +80,7 @@ def _product_dict(p):
 def home(request):
     """首页聚合:轮播图 + 分类宫格 + 热门商品。"""
     banners = [
-        {"image": b.image, "link": b.link}
+        {"image": b.asset.url if b.asset and b.asset.file else b.image, "link": b.link}
         for b in models.Banner.objects.order_by("sort", "id")
     ]
     if not banners:
@@ -417,7 +418,6 @@ def cart(request):
                 "title": p.title,
                 "image": p.image,
                 "price": p.price,
-                "originalPrice": p.original_price,
                 "quantity": it.quantity,
                 "isSelected": it.is_selected,
                 "stock": p.stock,
@@ -438,23 +438,38 @@ def cart_add(request):
     except (ValueError, UnicodeDecodeError):
         body = {}
     user = _get_or_create_user(body.get("uid", ""))
-    product = models.Product.objects.filter(id=body.get("productId"), is_on_sale=True).first()
-    if not product:
-        return envelope(None, code="Error", msg="商品不存在", success=False, status=404)
-    quantity = max(1, int(body.get("quantity", 1) or 1))
-    if product.stock <= 0:
-        return envelope(None, code="OutOfStock", msg="商品已售罄", success=False, status=400)
-    if quantity > product.stock:
-        return envelope(None, code="OutOfStock", msg="库存不足", success=False, status=400)
-
-    obj, created = models.CartItem.objects.get_or_create(
-        user=user, product=product,
-        defaults={"quantity": quantity, "is_selected": True},
-    )
-    if not created:
-        obj.quantity = min(product.stock, obj.quantity + quantity)
-        obj.is_selected = True
-        obj.save(update_fields=["quantity", "is_selected", "updated_at"])
+    try:
+        quantity = max(1, int(body.get("quantity", 1) or 1))
+    except (TypeError, ValueError):
+        return envelope(None, code="ValidationError", msg="数量参数错误", success=False, status=400)
+    with transaction.atomic():
+        product = models.Product.objects.select_for_update().filter(
+            id=body.get("productId"), is_on_sale=True
+        ).first()
+        if not product:
+            return envelope(None, code="Error", msg="商品不存在", success=False, status=404)
+        if product.stock <= 0:
+            return envelope(None, code="OutOfStock", msg="商品已售罄", success=False, status=400)
+        obj = models.CartItem.objects.select_for_update().filter(
+            user=user, product=product
+        ).first()
+        requested_quantity = quantity + (obj.quantity if obj else 0)
+        if requested_quantity > product.stock:
+            return envelope(
+                None,
+                code="OutOfStock",
+                msg=f"「{product.title}」库存不足,最多购买 {product.stock} 件",
+                success=False,
+                status=400,
+            )
+        if obj:
+            obj.quantity = requested_quantity
+            obj.is_selected = True
+            obj.save(update_fields=["quantity", "is_selected", "updated_at"])
+        else:
+            obj = models.CartItem.objects.create(
+                user=user, product=product, quantity=quantity, is_selected=True
+            )
     return envelope({"id": obj.id, "quantity": obj.quantity})
 
 
@@ -471,7 +486,19 @@ def cart_update(request):
     if not item:
         return envelope(None, code="Error", msg="购物车条目不存在", success=False, status=404)
     if "quantity" in body:
-        item.quantity = max(1, min(item.product.stock, int(body["quantity"] or 1)))
+        try:
+            quantity = max(1, int(body["quantity"] or 1))
+        except (TypeError, ValueError):
+            return envelope(None, code="ValidationError", msg="数量参数错误", success=False, status=400)
+        if quantity > item.product.stock:
+            return envelope(
+                None,
+                code="OutOfStock",
+                msg=f"「{item.product.title}」库存不足,最多购买 {item.product.stock} 件",
+                success=False,
+                status=400,
+            )
+        item.quantity = quantity
     if "isSelected" in body:
         item.is_selected = bool(body["isSelected"])
     item.save(update_fields=["quantity", "is_selected", "updated_at"])

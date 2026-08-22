@@ -4,6 +4,9 @@
 避免浮点精度问题。所有字段名使用 snake_case,API 输出时由序列化层
 映射为小程序端友好的 camelCase 字段。
 """
+from pathlib import Path
+
+from django.core.validators import FileExtensionValidator
 from django.db import models
 
 
@@ -13,6 +16,34 @@ class BaseModel(models.Model):
 
     class Meta:
         abstract = True
+
+
+class Asset(BaseModel):
+    """后台素材库中的本地图片。"""
+
+    name = models.CharField(max_length=256, blank=True, default="", verbose_name="素材名称")
+    file = models.FileField(
+        upload_to="assets/%Y/%m",
+        validators=[FileExtensionValidator(["jpg", "jpeg", "png", "gif", "webp"])],
+        verbose_name="图片文件",
+    )
+
+    class Meta:
+        verbose_name = "素材"
+        verbose_name_plural = "素材库"
+        ordering = ["-id"]
+
+    def save(self, *args, **kwargs):
+        if self.file and not self.name:
+            self.name = Path(self.file.name).stem
+        super().save(*args, **kwargs)
+
+    def __str__(self):
+        return self.name
+
+    @property
+    def url(self):
+        return self.file.url if self.file else ""
 
 
 class Category(BaseModel):
@@ -42,9 +73,16 @@ class Product(BaseModel):
     subtitle = models.CharField(max_length=256, blank=True, verbose_name="副标题")
     image = models.URLField(max_length=512, verbose_name="主图")
     images = models.JSONField(default=list, blank=True, verbose_name="图片列表")
+    primary_asset = models.ForeignKey(
+        Asset,
+        null=True,
+        blank=True,
+        related_name="primary_products",
+        on_delete=models.SET_NULL,
+        verbose_name="素材库主图",
+    )
     # 价格单位:分
     price = models.BigIntegerField(default=0, verbose_name="售价(分)")
-    original_price = models.BigIntegerField(default=0, verbose_name="原价(分)")
     stock = models.IntegerField(default=0, verbose_name="库存")
     sales = models.IntegerField(default=0, verbose_name="已售数量")
     category = models.ForeignKey(
@@ -65,10 +103,39 @@ class Product(BaseModel):
         return self.title
 
 
+class ProductGalleryImage(BaseModel):
+    """商品图片列表中的素材库图片。"""
+
+    product = models.ForeignKey(
+        Product, related_name="gallery_images", on_delete=models.CASCADE, verbose_name="商品"
+    )
+    asset = models.ForeignKey(
+        Asset, related_name="gallery_products", on_delete=models.PROTECT, verbose_name="素材"
+    )
+    sort = models.IntegerField(default=0, verbose_name="排序")
+
+    class Meta:
+        verbose_name = "商品图片"
+        verbose_name_plural = "商品图片"
+        ordering = ["sort", "id"]
+        unique_together = ("product", "asset")
+
+    def __str__(self):
+        return f"{self.product} - {self.asset}"
+
+
 class Banner(BaseModel):
     """首页轮播图。"""
 
     image = models.URLField(max_length=512, verbose_name="图片")
+    asset = models.ForeignKey(
+        Asset,
+        null=True,
+        blank=True,
+        related_name="banners",
+        on_delete=models.SET_NULL,
+        verbose_name="素材库图片",
+    )
     link = models.CharField(max_length=256, blank=True, verbose_name="跳转链接")
     sort = models.IntegerField(default=0, verbose_name="排序")
 
