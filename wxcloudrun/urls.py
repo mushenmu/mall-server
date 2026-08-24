@@ -3,6 +3,8 @@
 商城 API 路由。所有接口位于 /api/ 前缀,响应信封见 views.envelope。
 """
 from django.contrib import admin
+from django.conf import settings
+from django.conf.urls.static import static
 from django.urls import path, re_path
 
 from wxcloudrun import views
@@ -39,3 +41,6 @@ urlpatterns = [
     # 主页
     re_path(r"(/)?$", index),
 ]
+
+if settings.DEBUG:
+    urlpatterns += static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)

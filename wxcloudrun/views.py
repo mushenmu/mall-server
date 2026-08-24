@@ -7,6 +7,7 @@
 用户身份:小程序端通过 uid 参数定位用户(uid 默认取 openid)。
 """
 import json
+import re
 import time
 import urllib.parse
 import urllib.request
@@ -54,14 +55,15 @@ def _get_or_create_user(uid):
 
 
 def _product_dict(p):
+    gallery = [item.asset.url for item in p.gallery_images.all() if item.asset.file]
+    images = gallery or p.images or [p.image]
     return {
         "id": p.id,
         "title": p.title,
         "subtitle": p.subtitle,
         "image": p.image,
-        "images": p.images or [p.image],
+        "images": images,
         "price": p.price,
-        "originalPrice": p.original_price,
         "stock": p.stock,
         "sales": p.sales,
         "tags": p.tags or [],
@@ -78,7 +80,7 @@ def _product_dict(p):
 def home(request):
     """首页聚合:轮播图 + 分类宫格 + 热门商品。"""
     banners = [
-        {"image": b.image, "link": b.link}
+        {"image": b.asset.url if b.asset and b.asset.file else b.image, "link": b.link}
         for b in models.Banner.objects.order_by("sort", "id")
     ]
     if not banners:
@@ -128,8 +130,13 @@ def goods_list(request):
     """
     keyword = request.GET.get("keyword", "").strip()
     category_id = request.GET.get("categoryId", "").strip()
-    page_num = max(1, int(request.GET.get("pageNum", 1) or 1))
-    page_size = min(100, max(1, int(request.GET.get("pageSize", 20) or 20)))
+    try:
+        page_num = max(1, int(request.GET.get("pageNum", 1) or 1))
+        page_size = min(100, max(1, int(request.GET.get("pageSize", 20) or 20)))
+    except (TypeError, ValueError):
+        return envelope(
+            None, code="ValidationError", msg="分页参数格式错误", success=False, status=400
+        )
     sort = request.GET.get("sort", "").strip()
 
     qs = models.Product.objects.filter(is_on_sale=True)
@@ -208,11 +215,21 @@ def user_login(request):
     user = models.MallUser.objects.filter(openid=openid).first()
     is_new = user is None
     if is_new:
-        try:
-            user = models.MallUser.objects.create(uid=openid[:64], openid=openid, nickname="微信用户")
-        except IntegrityError:  # 并发兜底
-            user = models.MallUser.objects.filter(openid=openid).first()
+        # 其他匿名接口可能已按 uid 自动创建过用户，登录时复用并绑定 openid。
+        user = models.MallUser.objects.filter(uid=openid[:64]).first()
+        if user:
+            user.openid = openid
+            user.save(update_fields=["openid", "updated_at"])
             is_new = False
+        else:
+            try:
+                with transaction.atomic():
+                    user = models.MallUser.objects.create(
+                        uid=openid[:64], openid=openid, nickname="微信用户"
+                    )
+            except IntegrityError:  # 并发创建兜底
+                user = models.MallUser.objects.filter(uid=openid[:64]).first()
+                is_new = False
 
     # 可选:登录时更新昵称/头像
     nick_name = (body.get("nickName") or "").strip()
@@ -326,20 +343,41 @@ def address_save(request):
         body = {}
     user = _get_or_create_user(body.get("uid", ""))
     addr_id = body.get("id")
+    name = (body.get("name") or "").strip()
+    phone = (body.get("phone") or "").strip()
+    detail = (body.get("detail") or "").strip()
+    if not name or not detail or not re.fullmatch(r"1\d{10}", phone):
+        return envelope(
+            None,
+            code="ValidationError",
+            msg="请填写完整的收货人、手机号和详细地址",
+            success=False,
+            status=400,
+        )
     defaults = {
         "user": user,
-        "name": body.get("name", ""),
-        "phone": body.get("phone", ""),
-        "province": body.get("province", ""),
-        "city": body.get("city", ""),
-        "district": body.get("district", ""),
-        "detail": body.get("detail", ""),
+        "name": name,
+        "phone": phone,
+        "province": (body.get("province") or "").strip(),
+        "city": (body.get("city") or "").strip(),
+        "district": (body.get("district") or "").strip(),
+        "detail": detail,
         "is_default": bool(body.get("isDefault", False)),
     }
     with transaction.atomic():
-        obj, created = models.Address.objects.update_or_create(
-            id=addr_id, defaults=defaults
-        ) if addr_id else (models.Address.objects.create(**defaults), True)
+        if addr_id:
+            obj = models.Address.objects.filter(id=addr_id, user=user).first()
+            if not obj:
+                return envelope(
+                    None, code="NotFound", msg="地址不存在", success=False, status=404
+                )
+            for field, value in defaults.items():
+                setattr(obj, field, value)
+            obj.save()
+            created = False
+        else:
+            obj = models.Address.objects.create(**defaults)
+            created = True
         if obj.is_default:
             models.Address.objects.filter(user=user).exclude(id=obj.id).update(is_default=False)
     return envelope({"id": obj.id, "created": created})
@@ -354,7 +392,9 @@ def address_delete(request):
     except (ValueError, UnicodeDecodeError):
         body = {}
     user = _get_or_create_user(body.get("uid", ""))
-    models.Address.objects.filter(user=user, id=body.get("id")).delete()
+    deleted, _ = models.Address.objects.filter(user=user, id=body.get("id")).delete()
+    if not deleted:
+        return envelope(None, code="NotFound", msg="地址不存在", success=False, status=404)
     return envelope({"deleted": True})
 
 
@@ -378,7 +418,6 @@ def cart(request):
                 "title": p.title,
                 "image": p.image,
                 "price": p.price,
-                "originalPrice": p.original_price,
                 "quantity": it.quantity,
                 "isSelected": it.is_selected,
                 "stock": p.stock,
@@ -399,19 +438,38 @@ def cart_add(request):
     except (ValueError, UnicodeDecodeError):
         body = {}
     user = _get_or_create_user(body.get("uid", ""))
-    product = models.Product.objects.filter(id=body.get("productId"), is_on_sale=True).first()
-    if not product:
-        return envelope(None, code="Error", msg="商品不存在", success=False, status=404)
-    quantity = max(1, int(body.get("quantity", 1) or 1))
-
-    obj, created = models.CartItem.objects.get_or_create(
-        user=user, product=product,
-        defaults={"quantity": quantity, "is_selected": True},
-    )
-    if not created:
-        obj.quantity = min(product.stock, obj.quantity + quantity)
-        obj.is_selected = True
-        obj.save(update_fields=["quantity", "is_selected", "updated_at"])
+    try:
+        quantity = max(1, int(body.get("quantity", 1) or 1))
+    except (TypeError, ValueError):
+        return envelope(None, code="ValidationError", msg="数量参数错误", success=False, status=400)
+    with transaction.atomic():
+        product = models.Product.objects.select_for_update().filter(
+            id=body.get("productId"), is_on_sale=True
+        ).first()
+        if not product:
+            return envelope(None, code="Error", msg="商品不存在", success=False, status=404)
+        if product.stock <= 0:
+            return envelope(None, code="OutOfStock", msg="商品已售罄", success=False, status=400)
+        obj = models.CartItem.objects.select_for_update().filter(
+            user=user, product=product
+        ).first()
+        requested_quantity = quantity + (obj.quantity if obj else 0)
+        if requested_quantity > product.stock:
+            return envelope(
+                None,
+                code="OutOfStock",
+                msg=f"「{product.title}」库存不足,最多购买 {product.stock} 件",
+                success=False,
+                status=400,
+            )
+        if obj:
+            obj.quantity = requested_quantity
+            obj.is_selected = True
+            obj.save(update_fields=["quantity", "is_selected", "updated_at"])
+        else:
+            obj = models.CartItem.objects.create(
+                user=user, product=product, quantity=quantity, is_selected=True
+            )
     return envelope({"id": obj.id, "quantity": obj.quantity})
 
 
@@ -428,7 +486,19 @@ def cart_update(request):
     if not item:
         return envelope(None, code="Error", msg="购物车条目不存在", success=False, status=404)
     if "quantity" in body:
-        item.quantity = max(1, min(item.product.stock, int(body["quantity"] or 1)))
+        try:
+            quantity = max(1, int(body["quantity"] or 1))
+        except (TypeError, ValueError):
+            return envelope(None, code="ValidationError", msg="数量参数错误", success=False, status=400)
+        if quantity > item.product.stock:
+            return envelope(
+                None,
+                code="OutOfStock",
+                msg=f"「{item.product.title}」库存不足,最多购买 {item.product.stock} 件",
+                success=False,
+                status=400,
+            )
+        item.quantity = quantity
     if "isSelected" in body:
         item.is_selected = bool(body["isSelected"])
     item.save(update_fields=["quantity", "is_selected", "updated_at"])
@@ -473,24 +543,43 @@ def order_commit(request):
     if not addr:
         return envelope(None, code="Error", msg="请选择收货地址", success=False, status=400)
 
-    products = {
-        p.id: p for p in models.Product.objects.filter(
-            id__in=[i.get("productId") for i in items], is_on_sale=True
+    quantities = {}
+    try:
+        for item in items:
+            product_id = int(item.get("productId"))
+            quantity = max(1, int(item.get("quantity", 1) or 1))
+            quantities[product_id] = quantities.get(product_id, 0) + quantity
+    except (TypeError, ValueError):
+        return envelope(
+            None, code="ValidationError", msg="订单商品参数错误", success=False, status=400
         )
-    }
-    order_items = []
-    total = 0
-    for i in items:
-        p = products.get(i.get("productId"))
-        if not p:
-            return envelope(None, code="Error", msg="商品不存在或已下架", success=False, status=400)
-        qty = max(1, int(i.get("quantity", 1) or 1))
-        if qty > p.stock:
-            return envelope(None, code="Error", msg=f"「{p.title}」库存不足", success=False, status=400)
-        order_items.append((p, qty))
-        total += p.price * qty
 
     with transaction.atomic():
+        # 锁定商品行并按商品合并数量，避免重复条目或并发请求把库存扣成负数。
+        products = {
+            p.id: p for p in models.Product.objects.select_for_update().filter(
+                id__in=quantities.keys(), is_on_sale=True
+            )
+        }
+        order_items = []
+        total = 0
+        for product_id, quantity in quantities.items():
+            product = products.get(product_id)
+            if not product:
+                return envelope(
+                    None, code="Error", msg="商品不存在或已下架", success=False, status=400
+                )
+            if quantity > product.stock:
+                return envelope(
+                    None,
+                    code="OutOfStock",
+                    msg=f"「{product.title}」库存不足",
+                    success=False,
+                    status=400,
+                )
+            order_items.append((product, quantity))
+            total += product.price * quantity
+
         order = models.Order.objects.create(
             order_no=_gen_order_no(),
             user=user,
@@ -531,7 +620,17 @@ def order_list(request):
     qs = models.Order.objects.filter(user=user)
     status = request.GET.get("status", "").strip()
     if status != "":
-        qs = qs.filter(status=int(status))
+        try:
+            status_value = int(status)
+        except (TypeError, ValueError):
+            return envelope(
+                None, code="ValidationError", msg="订单状态格式错误", success=False, status=400
+            )
+        if status_value not in dict(models.Order.ORDER_STATUS):
+            return envelope(
+                None, code="ValidationError", msg="订单状态不存在", success=False, status=400
+            )
+        qs = qs.filter(status=status_value)
     qs = qs.prefetch_related("items")
     data = []
     for o in qs:
@@ -554,8 +653,11 @@ def order_list(request):
 
 @require_GET
 def order_detail(request):
-    """订单详情。Query: orderNo"""
-    order = models.Order.objects.filter(order_no=request.GET.get("orderNo", "")).first()
+    """订单详情。Query: uid, orderNo"""
+    user = _get_or_create_user(request.GET.get("uid", ""))
+    order = models.Order.objects.filter(
+        user=user, order_no=request.GET.get("orderNo", "")
+    ).prefetch_related("items").first()
     if not order:
         return envelope(None, code="NotFound", msg="订单不存在", success=False, status=404)
     items = [
