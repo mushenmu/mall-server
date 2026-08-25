@@ -33,6 +33,12 @@ python manage.py createsuperuser   # 管理后台:http://127.0.0.1:8000/admin/
 | `MYSQL_ADDRESS` | MySQL 连接地址 `host:port`(设置后自动使用 MySQL) |
 | `MYSQL_USERNAME` / `MYSQL_PASSWORD` / `MYSQL_DATABASE` | MySQL 账号信息 |
 | `WX_APPID` / `WX_SECRET` | 小程序 AppID / AppSecret(设置后登录走微信官方 jscode2session) |
+| `DJANGO_SECRET_KEY` | 生产环境 Django 签名密钥(必须配置) |
+| `DJANGO_DEBUG` | 是否开启调试；生产环境设置为 `0` |
+| `DJANGO_ALLOWED_HOSTS` | 生产环境允许的域名，逗号分隔 |
+| `ALLOW_LEGACY_UID_AUTH` | 仅开发联调兼容旧 UID；生产环境必须为 `0` |
+| `ALLOW_MOCK_LOGIN` / `ALLOW_MOCK_PAYMENT` | 仅开发环境启用模拟登录/支付，生产环境必须为 `0` |
+| `KUAIDI100_CUSTOMER` / `KUAIDI100_KEY` | 快递100服务端凭据，不要写入代码或 Git |
 
 未配置 `WX_APPID`/`WX_SECRET` 时,登录接口进入开发模式:任意 code
 映射到同一个 mock openid,本地联调无需真实密钥。
@@ -81,6 +87,7 @@ python manage.py createsuperuser   # 管理后台:http://127.0.0.1:8000/admin/
 | POST | `/api/order/pay` | 模拟支付(待付款 → 待发货) |
 | POST | `/api/order/cancel` | 取消订单(回补库存) |
 | POST | `/api/order/confirm` | 确认收货 |
+| GET | `/api/order/logistics?orderNo=` | 查询当前用户订单物流轨迹 |
 
 ## 订单状态
 
