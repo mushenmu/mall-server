@@ -20,6 +20,11 @@ DEBUG = os.environ.get("DJANGO_DEBUG", "1") == "1"
 
 _ALLOWED_HOSTS = os.environ.get("DJANGO_ALLOWED_HOSTS", "*" if DEBUG else "")
 ALLOWED_HOSTS = [host.strip() for host in _ALLOWED_HOSTS.split(",") if host.strip()]
+CSRF_TRUSTED_ORIGINS = [
+    origin.strip()
+    for origin in os.environ.get("DJANGO_CSRF_TRUSTED_ORIGINS", "").split(",")
+    if origin.strip()
+] or [f"https://{host}" for host in ALLOWED_HOSTS if host != "*"]
 if not DEBUG and (not os.environ.get("DJANGO_SECRET_KEY") or not ALLOWED_HOSTS):
     raise RuntimeError("生产环境必须配置 DJANGO_SECRET_KEY 和 DJANGO_ALLOWED_HOSTS")
 
