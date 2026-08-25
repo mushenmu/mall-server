@@ -1,0 +1,112 @@
+{% extends "admin/base_site.html" %}
+{% load i18n static %}
+
+{% block extrastyle %}
+{{ block.super }}
+<style>
+  .scan-card { max-width: 760px; background: #fff; border: 1px solid #ddd; border-radius: 6px; padding: 20px; }
+  .scan-meta { color: #666; margin: 0 0 16px; }
+  .scan-video { width: 100%; max-height: 360px; background: #111; border-radius: 6px; object-fit: contain; }
+  .scan-actions { display: flex; gap: 8px; margin: 12px 0; flex-wrap: wrap; }
+  .scan-field { margin: 14px 0; }
+  .scan-field label { display: block; font-weight: bold; margin-bottom: 5px; }
+  .scan-field input { width: min(100%, 520px); box-sizing: border-box; padding: 8px; }
+  .scan-error { color: #ba2121; margin: 10px 0; }
+  .scan-tip { color: #666; font-size: 13px; }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="scan-card">
+  <h1>扫码录入快递单号</h1>
+  <p class="scan-meta">订单号：<strong>{{ order.order_no }}</strong>　收货人：{{ order.receiver_name }}</p>
+  <p class="scan-tip">请使用 HTTPS 或 localhost 访问后台并允许浏览器使用摄像头。浏览器支持 BarcodeDetector 时可识别二维码和常见条形码；不支持时请手动输入。</p>
+
+  {% if error %}<p class="scan-error">{{ error }}</p>{% endif %}
+  <video id="scan-video" class="scan-video" autoplay muted playsinline hidden></video>
+  <p id="scan-status" class="scan-tip"></p>
+  <div class="scan-actions">
+    <button type="button" class="button" id="start-scan">打开摄像头扫码</button>
+    <button type="button" class="button" id="stop-scan" hidden>停止扫码</button>
+  </div>
+
+  <form method="post" id="express-form">
+    {% csrf_token %}
+    <div class="scan-field">
+      <label for="express_company">快递公司</label>
+      <input id="express_company" name="express_company" maxlength="64" value="{{ order.express_company }}" placeholder="例如：顺丰速运">
+    </div>
+    <div class="scan-field">
+      <label for="express_company_code">快递公司编码</label>
+      <input id="express_company_code" name="express_company_code" maxlength="32" value="{{ order.express_company_code }}" placeholder="例如：shunfeng，可选">
+    </div>
+    <div class="scan-field">
+      <label for="express_no">快递单号</label>
+      <input id="express_no" name="express_no" required maxlength="128" value="{{ order.express_no }}" placeholder="扫描后自动填入，也可以手动输入">
+    </div>
+    <div class="submit-row">
+      <input type="submit" value="保存并标记为待收货" class="default">
+      <a href="{% url 'admin:wxcloudrun_order_changelist' %}" class="button cancel-link">取消</a>
+    </div>
+  </form>
+</div>
+<script>
+(function () {
+  const video = document.getElementById('scan-video');
+  const input = document.getElementById('express_no');
+  const status = document.getElementById('scan-status');
+  const start = document.getElementById('start-scan');
+  const stop = document.getElementById('stop-scan');
+  let stream = null;
+  let timer = null;
+  let detector = null;
+
+  function stopScan() {
+    if (timer) window.clearInterval(timer);
+    timer = null;
+    if (stream) stream.getTracks().forEach(function (track) { track.stop(); });
+    stream = null;
+    video.srcObject = null;
+    video.hidden = true;
+    stop.hidden = true;
+    start.hidden = false;
+  }
+
+  stop.addEventListener('click', stopScan);
+  start.addEventListener('click', async function () {
+    if (!window.BarcodeDetector) {
+      status.textContent = '当前浏览器不支持摄像头自动解码，请手动输入快递单号。';
+      return;
+    }
+    try {
+      detector = new BarcodeDetector({ formats: [
+        'qr_code', 'code_128', 'code_39', 'code_93', 'codabar', 'ean_13', 'ean_8', 'itf'
+      ] });
+      stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: 'environment' } } });
+      video.srcObject = stream;
+      video.hidden = false;
+      stop.hidden = false;
+      start.hidden = true;
+      status.textContent = '请将快递单号条码或二维码放入取景框内。';
+      timer = window.setInterval(async function () {
+        if (!video.videoWidth) return;
+        try {
+          const codes = await detector.detect(video);
+          if (codes.length && codes[0].rawValue) {
+            input.value = codes[0].rawValue.trim();
+            status.textContent = '扫描成功，请确认快递公司后保存。';
+            stopScan();
+          }
+        } catch (error) {
+          status.textContent = '解码失败，请调整摄像头位置或手动输入。';
+        }
+      }, 350);
+    } catch (error) {
+      status.textContent = '无法打开摄像头，请检查 HTTPS、浏览器权限或改为手动输入。';
+      stopScan();
+    }
+  });
+  window.addEventListener('beforeunload', stopScan);
+})();
+</script>
+{% endblock %}

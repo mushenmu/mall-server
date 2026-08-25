@@ -213,6 +213,7 @@ class Order(BaseModel):
         (4, "已取消"),
     )
     order_no = models.CharField(max_length=64, unique=True, verbose_name="订单号")
+    client_request_id = models.CharField(max_length=64, null=True, blank=True, unique=True, verbose_name="客户端幂等号")
     user = models.ForeignKey(MallUser, related_name="orders", on_delete=models.CASCADE, verbose_name="所属用户")
     status = models.IntegerField(choices=ORDER_STATUS, default=0, verbose_name="订单状态")
     total_amount = models.BigIntegerField(default=0, verbose_name="商品总额(分)")
@@ -223,6 +224,10 @@ class Order(BaseModel):
     receiver_phone = models.CharField(max_length=32, blank=True, verbose_name="收货电话")
     receiver_address = models.CharField(max_length=512, blank=True, verbose_name="收货地址")
     pay_time = models.DateTimeField(null=True, blank=True, verbose_name="支付时间")
+    express_company = models.CharField(max_length=64, blank=True, verbose_name="快递公司")
+    express_company_code = models.CharField(max_length=32, blank=True, verbose_name="快递公司编码")
+    express_no = models.CharField(max_length=128, blank=True, verbose_name="快递单号")
+    shipped_at = models.DateTimeField(null=True, blank=True, verbose_name="发货时间")
 
     class Meta:
         verbose_name = "订单"

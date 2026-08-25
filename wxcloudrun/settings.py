@@ -13,12 +13,15 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 # See https://docs.djangoproject.com/en/3.2/howto/deployment/checklist/
 
 # SECURITY WARNING: keep the secret key used in production secret!
-SECRET_KEY = 'django-insecure-_&03zc)d*3)w-(0grs-+t-0jjxktn7k%$3y6$9=x_n_ibg4js6'
+SECRET_KEY = os.environ.get("DJANGO_SECRET_KEY", "dev-only-change-me")
 
 # SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = True
+DEBUG = os.environ.get("DJANGO_DEBUG", "1") == "1"
 
-ALLOWED_HOSTS = ['*']
+_ALLOWED_HOSTS = os.environ.get("DJANGO_ALLOWED_HOSTS", "*" if DEBUG else "")
+ALLOWED_HOSTS = [host.strip() for host in _ALLOWED_HOSTS.split(",") if host.strip()]
+if not DEBUG and (not os.environ.get("DJANGO_SECRET_KEY") or not ALLOWED_HOSTS):
+    raise RuntimeError("生产环境必须配置 DJANGO_SECRET_KEY 和 DJANGO_ALLOWED_HOSTS")
 
 # Application definition
 
@@ -36,7 +39,7 @@ MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',
-    # 'django.middleware.csrf.CsrfViewMiddleware',
+    'django.middleware.csrf.CsrfViewMiddleware',
     'django.contrib.auth.middleware.AuthenticationMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
@@ -202,11 +205,26 @@ MEDIA_ROOT = BASE_DIR / 'media'
 
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
+if not DEBUG:
+    SECURE_SSL_REDIRECT = True
+    SESSION_COOKIE_SECURE = True
+    CSRF_COOKIE_SECURE = True
+    SECURE_HSTS_SECONDS = 31536000
+    SECURE_HSTS_INCLUDE_SUBDOMAINS = True
+    SECURE_HSTS_PRELOAD = True
+    SECURE_CONTENT_TYPE_NOSNIFF = True
+
 # ---- 微信小程序登录(jscode2session)----
 # 生产:通过环境变量注入真实 AppID / AppSecret(export WX_APPID=... WX_SECRET=...)。
 # 未配置时后端进入开发模式:任意 code 都映射到同一个 mock openid,
 # 微信开发者工具本地联调即可跑通登录流程,无需真实密钥。
 WX_APPID = os.environ.get("WX_APPID", "")
 WX_SECRET = os.environ.get("WX_SECRET", "")
+ALLOW_MOCK_LOGIN = os.environ.get("ALLOW_MOCK_LOGIN", "1" if DEBUG else "0") == "1"
+ALLOW_LEGACY_UID_AUTH = os.environ.get("ALLOW_LEGACY_UID_AUTH", "1" if DEBUG else "0") == "1"
+ALLOW_MOCK_PAYMENT = os.environ.get("ALLOW_MOCK_PAYMENT", "1" if DEBUG else "0") == "1"
+AUTH_TOKEN_MAX_AGE = int(os.environ.get("AUTH_TOKEN_MAX_AGE", "604800"))
+KUAIDI100_CUSTOMER = os.environ.get("KUAIDI100_CUSTOMER", "")
+KUAIDI100_KEY = os.environ.get("KUAIDI100_KEY", "")
 
 LOGS_DIR = '/data/logs/'

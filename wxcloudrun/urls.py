@@ -35,6 +35,7 @@ urlpatterns = [
     path("api/order/commit", views.order_commit, name="order-commit"),
     path("api/order/list", views.order_list, name="order-list"),
     path("api/order/detail", views.order_detail, name="order-detail"),
+    path("api/order/logistics", views.order_logistics, name="order-logistics"),
     path("api/order/pay", views.order_pay, name="order-pay"),
     path("api/order/cancel", views.order_cancel, name="order-cancel"),
     path("api/order/confirm", views.order_confirm, name="order-confirm"),

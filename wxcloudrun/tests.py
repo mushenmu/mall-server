@@ -2,9 +2,11 @@ import json
 import tempfile
 
 from django.core.files.uploadedfile import SimpleUploadedFile
+from django.contrib.auth import get_user_model
 from django.test import TestCase, override_settings
 
 from . import models
+from .views import _auth_token
 
 
 class UserLoginTests(TestCase):
@@ -23,9 +25,55 @@ class UserLoginTests(TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["data"]["uid"], existing.uid)
+        self.assertTrue(response.json()["data"]["token"])
         self.assertEqual(models.MallUser.objects.count(), 1)
         existing.refresh_from_db()
         self.assertEqual(existing.openid, "mock_openid_dev")
+
+    @override_settings(ALLOW_LEGACY_UID_AUTH=False)
+    def test_business_api_requires_token(self):
+        response = self.client.get("/api/user/center", {"uid": "known-user"})
+
+        self.assertEqual(response.status_code, 401)
+        self.assertFalse(response.json()["success"])
+        self.assertFalse(models.MallUser.objects.filter(uid="known-user").exists())
+
+    @override_settings(ALLOW_LEGACY_UID_AUTH=False)
+    def test_business_api_uses_token_identity_not_query_uid(self):
+        owner = models.MallUser.objects.create(uid="token-owner", nickname="真实用户")
+
+        response = self.client.get(
+            "/api/user/center",
+            {"uid": "spoofed-user"},
+            HTTP_AUTHORIZATION=f"Bearer {_auth_token(owner.uid)}",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["data"]["userInfo"]["uid"], owner.uid)
+        self.assertFalse(models.MallUser.objects.filter(uid="spoofed-user").exists())
+
+    def test_malformed_authenticated_write_returns_invalid_json(self):
+        response = self.client.post(
+            "/api/cart/add", data=b"{", content_type="application/json"
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["code"], "InvalidJSON")
+
+    @override_settings(ALLOW_LEGACY_UID_AUTH=False)
+    def test_logistics_requires_express_number(self):
+        owner = models.MallUser.objects.create(uid="logistics-owner")
+        order = models.Order.objects.create(
+            order_no="LOGISTICS-NONE", user=owner, status=1, total_amount=100, payment_amount=100
+        )
+        response = self.client.get(
+            "/api/order/logistics",
+            {"orderNo": order.order_no},
+            HTTP_AUTHORIZATION=f"Bearer {_auth_token(owner.uid)}",
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["code"], "NoExpress")
 
 
 class AddressApiTests(TestCase):
@@ -277,3 +325,59 @@ class AssetLibraryTests(TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["data"]["swiper"][0]["image"], asset.url)
+
+
+class OrderAdminExpressTests(TestCase):
+    def setUp(self):
+        self.admin = get_user_model().objects.create_superuser(
+            username="admin", email="admin@example.com", password="admin-pass-123"
+        )
+        self.client.force_login(self.admin)
+        user = models.MallUser.objects.create(uid="admin-order-user")
+        self.order = models.Order.objects.create(
+            order_no="ADMIN-EXPRESS-001",
+            user=user,
+            status=1,
+            total_amount=100,
+            payment_amount=100,
+        )
+
+    def test_order_list_contains_scan_entry_button(self):
+        response = self.client.get("/admin/wxcloudrun/order/")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "扫码/录入")
+        self.assertContains(response, "scan-express")
+
+    def test_scan_page_saves_express_number_and_marks_order_shipped(self):
+        url = f"/admin/wxcloudrun/order/{self.order.pk}/scan-express/"
+        page = self.client.get(url)
+        self.assertEqual(page.status_code, 200)
+        self.assertContains(page, "打开摄像头扫码")
+
+        response = self.client.post(
+            url,
+            {
+                "express_company": "顺丰速运",
+                "express_company_code": "shunfeng",
+                "express_no": "SF1234567890",
+            },
+        )
+
+        self.assertRedirects(response, "/admin/wxcloudrun/order/")
+        self.order.refresh_from_db()
+        self.assertEqual(self.order.express_company, "顺丰速运")
+        self.assertEqual(self.order.express_company_code, "shunfeng")
+        self.assertEqual(self.order.express_no, "SF1234567890")
+        self.assertEqual(self.order.status, 2)
+        self.assertIsNotNone(self.order.shipped_at)
+
+    def test_scan_page_rejects_empty_express_number(self):
+        url = f"/admin/wxcloudrun/order/{self.order.pk}/scan-express/"
+        response = self.client.post(url, {"express_no": " "})
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "请输入有效的快递单号")
+        self.order.refresh_from_db()
+        self.assertEqual(self.order.express_no, "")
+        self.assertEqual(self.order.status, 1)

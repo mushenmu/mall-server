@@ -6,14 +6,18 @@
 价格字段单位为「分」(整数),前端展示时除以 100。
 用户身份:小程序端通过 uid 参数定位用户(uid 默认取 openid)。
 """
+import hashlib
 import json
 import re
 import time
 import urllib.parse
 import urllib.request
 from datetime import datetime
+from functools import wraps
 
 from django.conf import settings
+from django.core import signing
+from django.core.cache import cache
 from django.db import IntegrityError, transaction
 from django.db.models import Count, F
 from django.http import JsonResponse
@@ -52,6 +56,54 @@ def _get_or_create_user(uid):
         uid=uid, defaults={"nickname": "微信用户"}
     )
     return user
+
+
+def _auth_token(uid):
+    return signing.dumps({"uid": uid}, salt="mall-auth")
+
+
+def _require_user(request):
+    """从服务端签发的 Bearer Token 获取用户，拒绝客户端伪造 uid。"""
+    header = request.headers.get("Authorization", "")
+    if not header.startswith("Bearer "):
+        if getattr(settings, "ALLOW_LEGACY_UID_AUTH", False):
+            uid = request.GET.get("uid", "")
+            if request.method == "POST":
+                try:
+                    body = json.loads(request.body.decode("utf-8") or "{}")
+                except (ValueError, UnicodeDecodeError):
+                    body = {}
+                uid = body.get("uid", uid)
+            user = _get_or_create_user(uid)
+            return user, None
+        return None, envelope(None, code="AuthenticationRequired", msg="请先登录", success=False, status=401)
+    try:
+        payload = signing.loads(
+            header[7:].strip(), salt="mall-auth", max_age=getattr(settings, "AUTH_TOKEN_MAX_AGE", 604800)
+        )
+        user = models.MallUser.objects.filter(uid=payload.get("uid", "")).first()
+    except (signing.BadSignature, signing.SignatureExpired, AttributeError, TypeError):
+        user = None
+    if not user:
+        return None, envelope(None, code="AuthenticationRequired", msg="登录态已失效，请重新登录", success=False, status=401)
+    return user, None
+
+
+def require_auth(view_func):
+    @wraps(view_func)
+    def wrapped(request, *args, **kwargs):
+        if request.method == "POST":
+            try:
+                json.loads(request.body.decode("utf-8") or "{}")
+            except (ValueError, UnicodeDecodeError):
+                return envelope(None, code="InvalidJSON", msg="请求体不是有效 JSON", success=False, status=400)
+        user, error = _require_user(request)
+        if error:
+            return error
+        request.mall_user = user
+        return view_func(request, *args, **kwargs)
+
+    return wrapped
 
 
 def _product_dict(p):
@@ -246,6 +298,7 @@ def user_login(request):
 
     data = {
         "uid": user.uid,
+        "token": _auth_token(user.uid),
         "isNewUser": is_new,
         "userInfo": {
             "uid": user.uid,
@@ -262,6 +315,8 @@ def _exchange_code_for_openid(code):
     appid = (getattr(settings, "WX_APPID", "") or "").strip()
     secret = (getattr(settings, "WX_SECRET", "") or "").strip()
     if not appid or not secret:
+        if not getattr(settings, "ALLOW_MOCK_LOGIN", False):
+            return None
         return "mock_openid_dev"
     query = urllib.parse.urlencode(
         {"appid": appid, "secret": secret, "js_code": code, "grant_type": "authorization_code"}
@@ -280,9 +335,10 @@ def _exchange_code_for_openid(code):
 
 
 @require_GET
+@require_auth
 def user_center(request):
     """用户中心:用户信息 + 各状态订单数量。"""
-    user = _get_or_create_user(request.GET.get("uid", ""))
+    user = request.mall_user
     status_counts = {0: 0, 1: 0, 2: 0, 3: 0, 4: 0}
     for s, c in (
         models.Order.objects.filter(user=user)
@@ -312,9 +368,10 @@ def user_center(request):
 # 收货地址
 # ---------------------------------------------------------------------------
 @require_GET
+@require_auth
 def address_list(request):
     """地址列表。Query: uid"""
-    user = _get_or_create_user(request.GET.get("uid", ""))
+    user = request.mall_user
     addrs = models.Address.objects.filter(user=user).order_by("-is_default", "-id")
     data = [
         {
@@ -335,13 +392,14 @@ def address_list(request):
 
 @csrf_exempt
 @require_POST
+@require_auth
 def address_save(request):
     """新增/编辑地址。body: { uid, id?, name, phone, province, city, district, detail, isDefault }"""
     try:
         body = json.loads(request.body.decode("utf-8") or "{}")
     except (ValueError, UnicodeDecodeError):
         body = {}
-    user = _get_or_create_user(body.get("uid", ""))
+    user = request.mall_user
     addr_id = body.get("id")
     name = (body.get("name") or "").strip()
     phone = (body.get("phone") or "").strip()
@@ -385,13 +443,14 @@ def address_save(request):
 
 @csrf_exempt
 @require_POST
+@require_auth
 def address_delete(request):
     """删除地址。body: { uid, id }"""
     try:
         body = json.loads(request.body.decode("utf-8") or "{}")
     except (ValueError, UnicodeDecodeError):
         body = {}
-    user = _get_or_create_user(body.get("uid", ""))
+    user = request.mall_user
     deleted, _ = models.Address.objects.filter(user=user, id=body.get("id")).delete()
     if not deleted:
         return envelope(None, code="NotFound", msg="地址不存在", success=False, status=404)
@@ -402,9 +461,10 @@ def address_delete(request):
 # 购物车
 # ---------------------------------------------------------------------------
 @require_GET
+@require_auth
 def cart(request):
     """购物车列表。Query: uid"""
-    user = _get_or_create_user(request.GET.get("uid", ""))
+    user = request.mall_user
     items = models.CartItem.objects.filter(user=user).select_related("product").order_by("-id")
     list_data = []
     for it in items:
@@ -431,13 +491,14 @@ def cart(request):
 
 @csrf_exempt
 @require_POST
+@require_auth
 def cart_add(request):
     """加入购物车。body: { uid, productId, quantity? } 已存在则数量累加。"""
     try:
         body = json.loads(request.body.decode("utf-8") or "{}")
     except (ValueError, UnicodeDecodeError):
         body = {}
-    user = _get_or_create_user(body.get("uid", ""))
+    user = request.mall_user
     try:
         quantity = max(1, int(body.get("quantity", 1) or 1))
     except (TypeError, ValueError):
@@ -475,13 +536,14 @@ def cart_add(request):
 
 @csrf_exempt
 @require_POST
+@require_auth
 def cart_update(request):
     """更新购物车条目。body: { uid, id, quantity?, isSelected? }"""
     try:
         body = json.loads(request.body.decode("utf-8") or "{}")
     except (ValueError, UnicodeDecodeError):
         body = {}
-    user = _get_or_create_user(body.get("uid", ""))
+    user = request.mall_user
     item = models.CartItem.objects.filter(user=user, id=body.get("id")).select_related("product").first()
     if not item:
         return envelope(None, code="Error", msg="购物车条目不存在", success=False, status=404)
@@ -507,13 +569,14 @@ def cart_update(request):
 
 @csrf_exempt
 @require_POST
+@require_auth
 def cart_delete(request):
     """删除购物车条目。body: { uid, ids: [..] 或 id }"""
     try:
         body = json.loads(request.body.decode("utf-8") or "{}")
     except (ValueError, UnicodeDecodeError):
         body = {}
-    user = _get_or_create_user(body.get("uid", ""))
+    user = request.mall_user
     ids = body.get("ids") or ([body["id"]] if body.get("id") else [])
     models.CartItem.objects.filter(user=user, id__in=ids).delete()
     return envelope({"deleted": True})
@@ -528,13 +591,19 @@ def _gen_order_no():
 
 @csrf_exempt
 @require_POST
+@require_auth
 def order_commit(request):
     """提交订单(下单)。body: { uid, addressId, remark?, items: [{productId, quantity}] }"""
     try:
         body = json.loads(request.body.decode("utf-8") or "{}")
     except (ValueError, UnicodeDecodeError):
         body = {}
-    user = _get_or_create_user(body.get("uid", ""))
+    user = request.mall_user
+    client_request_id = (body.get("clientRequestId") or "").strip()
+    if client_request_id:
+        existing = models.Order.objects.filter(user=user, client_request_id=client_request_id).first()
+        if existing:
+            return envelope({"orderNo": existing.order_no, "paymentAmount": existing.payment_amount, "status": existing.status})
     items = body.get("items") or []
     if not items:
         return envelope(None, code="Error", msg="订单商品不能为空", success=False, status=400)
@@ -582,6 +651,7 @@ def order_commit(request):
 
         order = models.Order.objects.create(
             order_no=_gen_order_no(),
+            client_request_id=client_request_id or None,
             user=user,
             status=0,
             total_amount=total,
@@ -614,9 +684,10 @@ def order_commit(request):
 
 
 @require_GET
+@require_auth
 def order_list(request):
     """订单列表。Query: uid, status?(空=全部)"""
-    user = _get_or_create_user(request.GET.get("uid", ""))
+    user = request.mall_user
     qs = models.Order.objects.filter(user=user)
     status = request.GET.get("status", "").strip()
     if status != "":
@@ -642,6 +713,10 @@ def order_list(request):
                 "statusLabel": dict(models.Order.ORDER_STATUS)[o.status],
                 "totalAmount": o.total_amount,
                 "paymentAmount": o.payment_amount,
+                "expressCompany": o.express_company,
+                "expressCompanyCode": o.express_company_code,
+                "expressNo": o.express_no,
+                "shippedAt": o.shipped_at.strftime("%Y-%m-%d %H:%M:%S") if o.shipped_at else "",
                 "goodsCount": sum(i.quantity for i in o.items.all()),
                 "firstImage": first.goods_image if first else "",
                 "title": first.goods_name if first else "",
@@ -652,9 +727,10 @@ def order_list(request):
 
 
 @require_GET
+@require_auth
 def order_detail(request):
     """订单详情。Query: uid, orderNo"""
-    user = _get_or_create_user(request.GET.get("uid", ""))
+    user = request.mall_user
     order = models.Order.objects.filter(
         user=user, order_no=request.GET.get("orderNo", "")
     ).prefetch_related("items").first()
@@ -677,6 +753,10 @@ def order_detail(request):
         "statusLabel": dict(models.Order.ORDER_STATUS)[order.status],
         "totalAmount": order.total_amount,
         "paymentAmount": order.payment_amount,
+        "expressCompany": order.express_company,
+        "expressCompanyCode": order.express_company_code,
+        "expressNo": order.express_no,
+        "shippedAt": order.shipped_at.strftime("%Y-%m-%d %H:%M:%S") if order.shipped_at else "",
         "remark": order.remark,
         "receiver": {
             "name": order.receiver_name,
@@ -689,41 +769,112 @@ def order_detail(request):
     return envelope(data)
 
 
+def _query_kuaidi100(express_company, express_no):
+    customer = (getattr(settings, "KUAIDI100_CUSTOMER", "") or "").strip()
+    key = (getattr(settings, "KUAIDI100_KEY", "") or "").strip()
+    if not customer or not key:
+        return None, "物流服务未配置"
+    param = json.dumps({
+        "com": express_company or "auto",
+        "num": express_no,
+        "resultv2": "1",
+        "show": "0",
+        "order": "desc",
+    }, ensure_ascii=False, separators=(",", ":"))
+    sign = hashlib.md5((param + key + customer).encode("utf-8")).hexdigest().upper()
+    body = urllib.parse.urlencode({"customer": customer, "param": param, "sign": sign}).encode("utf-8")
+    request = urllib.request.Request(
+        "https://poll.kuaidi100.com/poll/query.do",
+        data=body,
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=5) as response:
+            result = json.loads(response.read().decode("utf-8") or "{}")
+    except Exception as exc:
+        print(f"[logistics] 快递100请求失败: {exc}")
+        return None, "物流服务暂时不可用"
+    if str(result.get("result", "true")).lower() == "false":
+        return None, result.get("message") or "物流查询失败"
+    traces = [
+        {"time": item.get("ftime") or item.get("time", ""), "context": item.get("context", "")}
+        for item in result.get("data", [])
+    ]
+    return {
+        "status": result.get("state", "0"),
+        "statusText": result.get("message", "查询成功"),
+        "traces": traces,
+        "updatedAt": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+    }, None
+
+
+@require_GET
+@require_auth
+def order_logistics(request):
+    """查询当前用户订单的物流轨迹。"""
+    order_no = (request.GET.get("orderNo") or "").strip()
+    order = models.Order.objects.filter(user=request.mall_user, order_no=order_no).first()
+    if not order:
+        return envelope(None, code="NotFound", msg="订单不存在", success=False, status=404)
+    if not order.express_no:
+        return envelope(None, code="NoExpress", msg="该订单暂未填写快递单号", success=False, status=400)
+    cache_key = f"order-logistics:{order.order_no}:{order.express_no}"
+    cached = cache.get(cache_key)
+    if cached:
+        return envelope(cached)
+    data, error = _query_kuaidi100(order.express_company_code, order.express_no)
+    if error:
+        return envelope(None, code="LogisticsUnavailable", msg=error, success=False, status=503)
+    data.update({
+        "orderNo": order.order_no,
+        "expressCompany": order.express_company,
+        "expressCompanyCode": order.express_company_code,
+        "expressNo": order.express_no,
+    })
+    cache.set(cache_key, data, 120)
+    return envelope(data)
+
+
 @csrf_exempt
 @require_POST
+@require_auth
 def order_pay(request):
-    """模拟支付(演示:直接置为待发货)。body: { uid, orderNo }"""
+    """开发环境模拟支付；生产环境必须接入微信支付回调。"""
+    if not getattr(settings, "ALLOW_MOCK_PAYMENT", False):
+        return envelope(None, code="PaymentUnavailable", msg="真实支付服务尚未配置", success=False, status=503)
     try:
         body = json.loads(request.body.decode("utf-8") or "{}")
     except (ValueError, UnicodeDecodeError):
         body = {}
-    user = _get_or_create_user(body.get("uid", ""))
-    order = models.Order.objects.filter(user=user, order_no=body.get("orderNo", "")).first()
-    if not order:
-        return envelope(None, code="Error", msg="订单不存在", success=False, status=404)
-    if order.status != 0:
-        return envelope(None, code="Error", msg="订单状态不允许支付", success=False, status=400)
-    order.status = 1
-    order.pay_time = datetime.now()
-    order.save(update_fields=["status", "pay_time", "updated_at"])
+    user = request.mall_user
+    with transaction.atomic():
+        order = models.Order.objects.select_for_update().filter(user=user, order_no=body.get("orderNo", "")).first()
+        if not order:
+            return envelope(None, code="Error", msg="订单不存在", success=False, status=404)
+        if order.status != 0:
+            return envelope(None, code="Error", msg="订单状态不允许支付", success=False, status=400)
+        order.status = 1
+        order.pay_time = datetime.now()
+        order.save(update_fields=["status", "pay_time", "updated_at"])
     return envelope({"orderNo": order.order_no, "status": order.status})
 
 
 @csrf_exempt
 @require_POST
+@require_auth
 def order_cancel(request):
     """取消订单(仅待付款可取消,并回补库存)。body: { uid, orderNo }"""
     try:
         body = json.loads(request.body.decode("utf-8") or "{}")
     except (ValueError, UnicodeDecodeError):
         body = {}
-    user = _get_or_create_user(body.get("uid", ""))
-    order = models.Order.objects.filter(user=user, order_no=body.get("orderNo", "")).first()
-    if not order:
-        return envelope(None, code="Error", msg="订单不存在", success=False, status=404)
-    if order.status != 0:
-        return envelope(None, code="Error", msg="订单状态不允许取消", success=False, status=400)
+    user = request.mall_user
     with transaction.atomic():
+        order = models.Order.objects.select_for_update().filter(user=user, order_no=body.get("orderNo", "")).first()
+        if not order:
+            return envelope(None, code="Error", msg="订单不存在", success=False, status=404)
+        if order.status != 0:
+            return envelope(None, code="Error", msg="订单状态不允许取消", success=False, status=400)
         for i in order.items.all():
             if i.product_id:
                 models.Product.objects.filter(id=i.product_id).update(
@@ -737,18 +888,20 @@ def order_cancel(request):
 
 @csrf_exempt
 @require_POST
+@require_auth
 def order_confirm(request):
     """确认收货。body: { uid, orderNo }"""
     try:
         body = json.loads(request.body.decode("utf-8") or "{}")
     except (ValueError, UnicodeDecodeError):
         body = {}
-    user = _get_or_create_user(body.get("uid", ""))
-    order = models.Order.objects.filter(user=user, order_no=body.get("orderNo", "")).first()
-    if not order:
-        return envelope(None, code="Error", msg="订单不存在", success=False, status=404)
-    if order.status != 2:
-        return envelope(None, code="Error", msg="订单状态不允许确认收货", success=False, status=400)
-    order.status = 3
-    order.save(update_fields=["status", "updated_at"])
+    user = request.mall_user
+    with transaction.atomic():
+        order = models.Order.objects.select_for_update().filter(user=user, order_no=body.get("orderNo", "")).first()
+        if not order:
+            return envelope(None, code="Error", msg="订单不存在", success=False, status=404)
+        if order.status != 2:
+            return envelope(None, code="Error", msg="订单状态不允许确认收货", success=False, status=400)
+        order.status = 3
+        order.save(update_fields=["status", "updated_at"])
     return envelope({"orderNo": order.order_no, "status": order.status})
