@@ -818,6 +818,11 @@ def order_logistics(request):
         return envelope(None, code="NotFound", msg="订单不存在", success=False, status=404)
     if not order.express_no:
         return envelope(None, code="NoExpress", msg="该订单暂未填写快递单号", success=False, status=400)
+    rate_key = f"logistics-rate:{request.mall_user.uid}"
+    recent = cache.get(rate_key) or 0
+    if recent >= 10:
+        return envelope(None, code="TooManyRequests", msg="查询过于频繁，请稍后再试", success=False, status=429)
+    cache.set(rate_key, recent + 1, 60)
     cache_key = f"order-logistics:{order.order_no}:{order.express_no}"
     cached = cache.get(cache_key)
     if cached:

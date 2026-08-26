@@ -233,6 +233,10 @@ class Order(BaseModel):
         verbose_name = "订单"
         verbose_name_plural = "订单"
         ordering = ["-id"]
+        indexes = [
+            models.Index(fields=["user", "-created_at"]),
+            models.Index(fields=["status"]),
+        ]
 
     def __str__(self):
         return self.order_no
@@ -255,3 +259,21 @@ class OrderItem(BaseModel):
 
     def __str__(self):
         return self.goods_name
+
+
+class ExpressLog(BaseModel):
+    """后台快递单号新增/修改记录。"""
+
+    order = models.ForeignKey(Order, related_name="express_logs", on_delete=models.CASCADE, verbose_name="订单")
+    operator = models.CharField(max_length=64, blank=True, verbose_name="操作人")
+    express_company = models.CharField(max_length=64, blank=True, verbose_name="快递公司")
+    express_company_code = models.CharField(max_length=32, blank=True, verbose_name="快递公司编码")
+    express_no = models.CharField(max_length=128, verbose_name="快递单号")
+
+    class Meta:
+        verbose_name = "物流修改记录"
+        verbose_name_plural = "物流修改记录"
+        ordering = ["-id"]
+
+    def __str__(self):
+        return f"{self.order} {self.express_no}"

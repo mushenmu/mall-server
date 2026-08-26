@@ -20,4 +20,8 @@ else:
 "
 
 echo "[entrypoint] 启动服务..."
-exec python3 manage.py runserver 0.0.0.0:80
+if [ "${DJANGO_DEBUG:-1}" = "1" ]; then
+    exec python3 manage.py runserver 0.0.0.0:80
+else
+    exec python3 -m gunicorn wxcloudrun.wsgi:application --bind 0.0.0.0:80 --workers 2 --threads 4 --timeout 60 --access-logfile -
+fi

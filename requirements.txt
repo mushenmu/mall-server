@@ -3,3 +3,4 @@ Django==4.1.13
 PyMySQL==1.1.1
 pytz==2025.1
 sqlparse==0.5.3
+gunicorn==21.2.0

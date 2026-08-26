@@ -177,7 +177,10 @@ class OrderAdmin(admin.ModelAdmin):
             express_no = (request.POST.get("express_no") or "").strip()
             if not express_no or len(express_no) > 128:
                 context = {"order": order, "error": "请输入有效的快递单号(1-128个字符)"}
+            elif order.status in (0, 4):
+                context = {"order": order, "error": "待付款或已取消订单不允许录入快递单号"}
             else:
+                old_express_no = order.express_no
                 order.express_company = company[:64]
                 order.express_company_code = company_code[:32]
                 order.express_no = express_no
@@ -188,7 +191,15 @@ class OrderAdmin(admin.ModelAdmin):
                     "express_company", "express_company_code", "express_no",
                     "shipped_at", "status", "updated_at",
                 ])
-                self.message_user(request, "快递单号已保存，订单已标记为待收货")
+                action_text = "新增" if not old_express_no else "修改"
+                self.message_user(request, f"已{action_text}快递单号，订单标记为待收货")
+                models.ExpressLog.objects.create(
+                    order=order,
+                    operator=request.user.username or "admin",
+                    express_company=order.express_company,
+                    express_company_code=order.express_company_code,
+                    express_no=order.express_no,
+                )
                 return HttpResponseRedirect(reverse("admin:wxcloudrun_order_changelist"))
         else:
             context = {"order": order}
